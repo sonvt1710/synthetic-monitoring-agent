@@ -17,12 +17,14 @@ const (
 	CHECK_PING checkType = iota
 	CHECK_HTTP
 	CHECK_DNS
+	CHECK_TCP
 )
 
 func main() {
 	doWritePing := flag.Bool("write-ping", false, "write example ping document")
 	doWriteHttp := flag.Bool("write-http", false, "write example http document")
 	doWriteDns := flag.Bool("write-dns", false, "write example dns document")
+	doWriteTcp := flag.Bool("write-tcp", false, "write example tcp document")
 
 	flag.Parse()
 
@@ -33,6 +35,8 @@ func main() {
 		write(CHECK_HTTP)
 	case *doWriteDns:
 		write(CHECK_DNS)
+	case *doWriteTcp:
+		write(CHECK_TCP)
 	default:
 		read()
 	}
@@ -64,11 +68,13 @@ func write(checkType checkType) {
 	var (
 		settings sm.CheckSettings
 		target   string
+		job      string
 	)
 
 	switch checkType {
 	case CHECK_PING:
 		target = "grafana.com"
+		job = "ping"
 		settings = sm.CheckSettings{
 			Ping: &sm.PingSettings{
 				IpVersion: sm.IpVersion_V4,
@@ -77,6 +83,7 @@ func write(checkType checkType) {
 
 	case CHECK_HTTP:
 		target = "https://grafana.com/"
+		job = "http"
 		settings = sm.CheckSettings{
 			Http: &sm.HttpSettings{
 				Method:       sm.HttpMethod_GET,
@@ -87,6 +94,7 @@ func write(checkType checkType) {
 
 	case CHECK_DNS:
 		target = "grafana.com"
+		job = "dns"
 		settings = sm.CheckSettings{
 			Dns: &sm.DnsSettings{
 				RecordType: sm.DnsRecordType_A,
@@ -96,18 +104,30 @@ func write(checkType checkType) {
 				Port:       53,
 			},
 		}
+
+	case CHECK_TCP:
+		target = "grafana.com:80"
+		job = "tcp"
+		settings = sm.CheckSettings{
+			Tcp: &sm.TcpSettings{
+				IpVersion: sm.IpVersion_V4,
+			},
+		}
 	}
 
 	check := sm.Check{
-		Id:        123,
-		TenantId:  27172,
-		Frequency: 5000,
-		Offset:    2300,
-		Timeout:   2500,
-		Enabled:   true,
-		Labels:    []sm.Label{{Name: "environment", Value: "production"}},
-		Target:    target,
-		Settings:  settings,
+		Id:               123,
+		TenantId:         27172,
+		Frequency:        5000,
+		Offset:           2300,
+		Timeout:          2500,
+		Enabled:          true,
+		Labels:           []sm.Label{{Name: "environment", Value: "production"}},
+		Target:           target,
+		Job:              job,
+		Settings:         settings,
+		BasicMetricsOnly: true,
+		Probes:           []int64{1},
 	}
 
 	if err := check.Validate(); err != nil {

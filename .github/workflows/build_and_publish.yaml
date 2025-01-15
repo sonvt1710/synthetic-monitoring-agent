@@ -1,0 +1,327 @@
+on:
+  workflow_call:
+    inputs:
+      mode:
+        required: true
+        type: string
+
+jobs:
+  preflight:
+    name: Preflight checks
+    runs-on: ubuntu-latest
+    outputs:
+      repo_name: ${{ steps.info.outputs.repo_name }}
+    steps:
+      - name: Validate mode
+        run: |
+          if [ "${{ inputs.mode }}" != "dev" ] && [ "${{ inputs.mode }}" != "prod" ]; then
+            echo "Invalid mode: ${{ inputs.mode }}"
+            exit 1
+          fi
+
+      - name: Get repository name
+        id: info
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "repo_name=${REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: validate
+    needs: [preflight]
+    if: ${{ always() && needs.preflight.result == 'success' }}
+    strategy:
+      matrix:
+        arch: [ x64-large, arm64 ]
+    runs-on: github-hosted-ubuntu-${{ matrix.arch }}
+
+    container:
+      image: ghcr.io/grafana/grafana-build-tools:v0.36.0@sha256:deec32592848cde11ff64b4a5803b85546027dfb7b98921a0d0b89cd2226612f
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up global git config
+        run: |
+          # The directory where the code has been checked out ends up belonging
+          # to a different user, so git complains about permissions. Indicate
+          # that it's safe to ignore.
+          git config --global --add safe.directory '*'
+
+      - name: Restore Go cache
+        id: restore-go-cache
+        uses: ./.github/actions/go-cache-restore
+
+      - name: build info
+        id: build-info
+        run: |
+          echo "os=$(go env GOOS)" >> "$GITHUB_OUTPUT"
+          echo "arch=$(go env GOARCH)" >> "$GITHUB_OUTPUT"
+
+      - name: ensure dependencies are up-to-date
+        run: |
+          make deps
+          scripts/enforce-clean
+
+      - name: version
+        id: version
+        run: |
+          make version
+          echo "value=$(cat dist/version)" >> "$GITHUB_OUTPUT"
+
+      - name: build
+        run: make build-native
+
+      - name: lint
+        run: make lint
+
+      - name: test
+        run: make test
+
+      - name: build packages
+        run: make package-native
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@6524bf65af31da8d45b59e8c27de4bd072b392f5 # v3.8.0
+
+      - name: build docker image (no browser)
+        uses: docker/build-push-action@b32b51a8eda65d6793cd0494a773d4f6bcef32dc # v6.11.0
+        with:
+          context: .
+          push: false
+          file: Dockerfile.build
+          target: release
+          outputs: type=tar,dest=dist/container-image.no-browser.${{ steps.build-info.outputs.os }}-${{ steps.build-info.outputs.arch }}.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: build docker image (browser)
+        uses: docker/build-push-action@b32b51a8eda65d6793cd0494a773d4f6bcef32dc # v6.11.0
+        with:
+          context: .
+          push: false
+          file: Dockerfile.build
+          target: with-browser
+          outputs: type=tar,dest=dist/container-image.browser.${{ steps.build-info.outputs.os }}-${{ steps.build-info.outputs.arch }}.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: create build artfact
+        run: |
+          tar cf dist/build-artifacts.${{ steps.build-info.outputs.os }}-${{ steps.build-info.outputs.arch }}.tar \
+            dist/container-image.*.*.tar \
+            dist/${{ steps.build-info.outputs.os }}-${{ steps.build-info.outputs.arch }}
+
+      - name: upload build artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
+        with:
+          name: build-artifacts-${{ steps.build-info.outputs.os }}-${{ steps.build-info.outputs.arch }}
+          path: dist/build-artifacts.${{ steps.build-info.outputs.os }}-${{ steps.build-info.outputs.arch }}.tar
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: false
+
+      - name: Save Go cache
+        id: save-go-cache
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.restore-go-cache.outputs.key }}
+          path: ${{ steps.restore-go-cache.outputs.path }}
+
+  publish_images:
+    name: publish images
+    needs:
+      - preflight
+      - validate
+    if: ${{ always() && needs.validate.result == 'success' && needs.preflight.result == 'success' }}
+    runs-on: github-hosted-ubuntu-x64-small
+    outputs:
+      image_name: ${{ steps.extract-image-metadata.outputs.image }}
+      image_tag: ${{ steps.extract-image-metadata.outputs.tag }}
+    steps:
+      - name: Retrieve release app credentials
+        id: get-secrets
+        uses: grafana/shared-workflows/actions/get-vault-secrets@7d18a46aafb8b875ed76a0bc98852d74b91e7f91  # v1.0.0
+        with:
+          vault_instance: ops
+          repo_secrets: |
+            SM_RELEASE_APP_ID=github-app:app-id
+            SM_RELEASE_APP_PRIVATE_KEY=github-app:private-key
+
+      - name: Generate release app token
+        id: sm-release-app
+        uses: actions/create-github-app-token@c1a285145b9d317df6ced56c09f525b5c2b6f755 # v1
+        with:
+          app-id: ${{ env.SM_RELEASE_APP_ID }}
+          private-key: ${{ env.SM_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ needs.preflight.outputs.repo_name }}
+
+      - name: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up global git config
+        run: |
+          # The directory where the code has been checked out ends up belonging
+          # to a different user, so git complains about permissions. Indicate
+          # that it's safe to ignore.
+          git config --global --add safe.directory '*'
+
+      - name: download build artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          path: dist
+          pattern: build-artifacts-*
+
+      - name: extract build artifacts
+        id: extract-build-artifacts
+        # Note that the download-artifact action will create a directory for
+        # each artifact that it downloads, named afer the artifact's name.
+        # That's the `build-artifacts-*` portion of the path.
+        #
+        # After extracting all the artifacts, this builds an output named
+        # `platforms` that lists all the platforms that are available. This is
+        # used by the step that builds the docker images to tell it what
+        # platforms should be included.
+        run: |
+          find dist/build-artifacts-*/build-artifacts.*.tar -print0 |
+            xargs -r0 -I{} tar -xvpf {}
+
+          {
+            echo 'platforms<<EOT'
+            find dist/ -maxdepth 1 -name 'container-image.*.*.tar' -print0 |
+              xargs -r0 -n1 basename |
+              cut -d. -f3 |
+              tr - /
+            echo 'EOT'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: push container images to GAR (no browser)
+        id: push-to-gar
+        uses: grafana/shared-workflows/actions/push-to-gar-docker@7d18a46aafb8b875ed76a0bc98852d74b91e7f91 # v1.0.0
+        with:
+          environment: ${{ inputs.mode }}
+          image_name: ${{ needs.preflight.outputs.repo_name }}
+          push: true
+          platforms: ${{ steps.extract-build-artifacts.outputs.platforms }}
+          tags: |-
+            type=raw,value=${{ needs.validate.outputs.version }}
+            type=sha,prefix=sha-,format=short
+            latest
+          file: Dockerfile.no-browser
+
+      - name: push container images to GAR (browser)
+        uses: grafana/shared-workflows/actions/push-to-gar-docker@7d18a46aafb8b875ed76a0bc98852d74b91e7f91 # v1.0.0
+        with:
+          environment: ${{ inputs.mode }}
+          image_name: ${{ needs.preflight.outputs.repo_name }}
+          push: true
+          platforms: ${{ steps.extract-build-artifacts.outputs.platforms }}
+          tags: |-
+            type=raw,value=${{ needs.validate.outputs.version }}-browser
+            type=sha,prefix=sha-,suffix=-browser,format=short
+            latest-browser
+          file: Dockerfile.browser
+
+      - name: extract image metadata
+        id: extract-image-metadata
+        run: |
+          # Note that the variable DOCKER_METADATA_OUTPUT_BAKE_FILE_TAGS
+          # already contains the name of the variables. It has the form
+          # key=value\nkey=value\n...
+          ./scripts/extract-image-info "${DOCKER_METADATA_OUTPUT_BAKE_FILE_TAGS}"
+          ./scripts/extract-image-info "${DOCKER_METADATA_OUTPUT_BAKE_FILE_TAGS}" >> "$GITHUB_OUTPUT"
+
+      # Add packages to release, but only in production mode, because dev mode doesn't have a tag.
+      - name: add packages to release
+        id: add-packages-to-release
+        env:
+          GH_TOKEN: ${{ steps.sm-release-app.outputs.token }}
+        if: ${{ always() && inputs.mode == 'prod' }}
+        run: |
+          tag=${GITHUB_REF##*/}
+          # Make sure this is a tag. The following command will fail otherwise.
+          git rev-parse "refs/tags/$tag"
+          find dist/ -mindepth 2 -maxdepth 2 -type f \( -name \*.rpm -o -name \*.deb \) -print0 |
+            xargs -r0 gh release upload "$tag"
+
+      - name: push container images to docker hub (no browser)
+        id: push-no-browser-to-docker-hub
+        # if: ${{ always() && inputs.mode == 'prod' }}
+        uses: grafana/shared-workflows/actions/build-push-to-dockerhub@7d18a46aafb8b875ed76a0bc98852d74b91e7f91 # v1.0.0
+        with:
+          repository: ${{ github.repository }}
+          # Go thru the motions, but publish only in prod mode.
+          push: ${{ inputs.mode == 'prod' }}
+          platforms: ${{ steps.extract-build-artifacts.outputs.platforms }}
+          tags: |-
+            type=raw,value=${{ needs.validate.outputs.version }}
+            type=sha,prefix=sha-,format=short
+            latest
+          file: Dockerfile.no-browser
+
+      - name: push container images to docker hub (browser)
+        id: push-browser-to-docker-hub
+        # if: ${{ always() && inputs.mode == 'prod' }}
+        uses: grafana/shared-workflows/actions/build-push-to-dockerhub@7d18a46aafb8b875ed76a0bc98852d74b91e7f91 # v1.0.0
+        with:
+          repository: ${{ github.repository }}
+          # Go thru the motions, but publish only in prod mode.
+          push: ${{ inputs.mode == 'prod' }}
+          platforms: ${{ steps.extract-build-artifacts.outputs.platforms }}
+          tags: |-
+            type=raw,value=${{ needs.validate.outputs.version }}-browser
+            type=sha,prefix=sha-,suffix=-browser,format=short
+            latest-browser
+          file: Dockerfile.browser
+
+  deploy:
+    name: deploy
+    needs:
+      - preflight
+      - validate
+      - publish_images
+    if: ${{ always() && needs.publish_images.result == 'success' && needs.validate.result == 'success' && needs.preflight.result == 'success' }}
+    runs-on: github-hosted-ubuntu-x64-small
+    steps:
+      # The following two steps are needed because trigger-argo-workflow is
+      # calling setup-go *after* setup-argo, and setup-argo actually needs go
+      # to obtain GOOS and GOARCH (because it's downloading a remote tarball
+      # where those values are part of the filename).
+      - name: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
+        with:
+          go-version-file: ./go.mod
+
+      - name: Trigger argo workflow
+        # trigger-argo-workflow hasn't been released yet, so we're using a
+        # commit hash to reference it that has no associated version.
+        uses: grafana/shared-workflows/actions/trigger-argo-workflow@bec45d4fa8663752aa6560129696a21bb36359c7
+        with:
+          namespace: synthetic-monitoring-cd
+          workflow_template: deploy-${{ needs.preflight.outputs.repo_name }}
+          extra_args: "--generate-name deploy-${{ needs.preflight.outputs.repo_name }}-"
+          # 'image_version' is the actual version number that is embedded in
+          # the binary and is reported as part of info metrics, so it cannot be
+          # `image_tag` because that might be a diferent value.
+          parameters: |
+            mode=${{ (inputs.mode == 'prod' && 'release') || (inputs.mode == 'dev' && 'dev') }}
+            image=${{ needs.publish_images.outputs.image_name }}:${{ needs.publish_images.outputs.image_tag }}
+            image_name=${{ needs.publish_images.outputs.image_name }}
+            image_version=${{ needs.validate.outputs.version }}
+            dockertag=${{ needs.publish_images.outputs.image_tag }}
+            commit=${{ github.sha }}
+            commit_author=${{ github.actor }}
+            commit_link=${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}

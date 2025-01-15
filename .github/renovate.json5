@@ -1,40 +1,22 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:best-practices",
-    ":semanticCommitsDisabled"
+    "github>grafana/sm-renovate//presets/grafana.json5",
+    "github>grafana/sm-renovate//presets/synthetic-monitoring.json5",
+    "github>grafana/sm-renovate//presets/go.json5",
+    "github>grafana/sm-renovate//presets/grafana-build-tools.json5"
   ],
-
-  "branchPrefix": "grafanarenovatebot/",
-  // Used when renovate runs as a github app.
-  // https://docs.renovatebot.com/configuration-options/#platformcommit
-  // Setting platformCommit to `true`, as required by Grafana policy, seems to make renovate think all PRs are modified,
-  // as the dynamic author configured by github does not match the author set in `gitAuthor`. It is recommended to
-  // leave it unset: https://github.com/renovatebot/renovate/discussions/29106.
-  "platformCommit": true,
-  "dependencyDashboard": false,
-  "forkProcessing": "disabled",
-  "labels": ["dependencies"],
-
-  "postUpdateOptions": [
-    "gomodTidyE"
-  ],
-
-  "packageRules" : [
+  "packageRules": [
     {
-      // Non-versioned go modules are noisy, with almost daily updates. We throttle them a bit.
-      "matchManagers": ["gomod"],
-      "matchUpdateTypes": ["digest"],
-      "schedule": "before 8am on monday every 2 weeks",
-    },
-    {
-      // Group prometheus-go updates, so prometheus-common is in sync with client-go.
-      "matchManagers": ["gomod"],
-      "matchPackageNames": "github.com/prometheus/*",
-      "groupName": "prometheus-go"
-    },
+      // The default "docker" versioning will try to restrict upgrades to versions that do not change everything after
+      // a dash (-) for the current tag, as this typically indicates the "flavor" (e.g. postgresql:17.1-alpine will not
+      // be upgraded to postgresql:17.2-debian).
+      // This image in particular has lots of dashes and does not follow this convention, so we force "loose"
+      // versioning which is pretty much an alphabetical sort.
+      "matchPackageNames": ["ghcr.io/grafana/chromium-swiftshader-alpine"],
+      "versioning": "loose"
+    }
   ],
-
   "customManagers": [
     {
       // Update k6 version in Dockerfiles.
@@ -45,50 +27,6 @@
       "matchStrings": [
         "(?:^|\\n)[ \\t]*K6_VERSION\\s*:=\\s*(?<currentValue>\\S+)[ \\t]*(?:$|\\n)"
       ]
-    },
-    {
-      // Update grafana-build-tools tags across the repository.
-      "customType": "regex",
-      "depNameTemplate": "ghcr.io/grafana/grafana-build-tools",
-      "datasourceTemplate": "docker",
-      "versioningTemplate": "semver",
-      "fileMatch": [
-        "^\\.github/workflows/.*\\.ya?ml$",
-        "(^|/)Makefile$",
-        ".*\\.jsonnet$",
-        ".*\\.mk$"
-      ],
-      "matchStrings": [
-        "ghcr.io/grafana/grafana-build-tools:(?<currentValue>[\\w-+.]+)"
-      ]
-    },
-    {
-      // Update pinned alpine packages in Dockerfile.
-      "customType": "regex",
-      "fileMatch": [ "Dockerfile" ],
-      "matchStrings": [
-        // Lines that loosely look like "apk add --repository community something=version".
-        // To keep this regex simple, only one package per "apk add" is supported.
-        "\\bapk\\b.+?\\badd\\b.+?(--repository|-X)[ =\\t]+(?<alpineRepo>[a-z]+)\\s+(?<depName>[-\\w]+?)=(?<currentValue>[-.\\w]+)"
-      ],
-      "versioningTemplate": "loose", // The most lenient versioning renovate supports.
-      // We use two different datasources for main and community, as alpine serves them in different URLs.
-      "datasourceTemplate": "custom.alpine-{{alpineRepo}}",
-      // Extracted "versions" include the package name, so here we strip that prefix using a regex.
-      "extractVersionTemplate": "{{depName}}-(?<version>.+).apk",
-    },
-  ],
-
-  "customDatasources": {
-    // Use alpine HTML mirror page as a repository. When using `html` format, renovate produces version strings from
-    // all links present in the page. The version is extracted from that using extractVersionTemplate above.
-    "alpine-main": {
-      "defaultRegistryUrlTemplate": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/x86_64/",
-      "format": "html",
-    },
-    "alpine-community": {
-      "defaultRegistryUrlTemplate": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/community/x86_64/",
-      "format": "html",
-    },
-  },
+    }
+  ]
 }

@@ -46,7 +46,7 @@ jobs:
       id-token: none
 
     container:
-      image: ghcr.io/grafana/grafana-build-tools:v0.40.3@sha256:1e112c01108b888ae64e786e6d13a8e46c02884f94ccf784ad646d906ac97254
+      image: ghcr.io/grafana/grafana-build-tools:v1.7.3@sha256:0cee570feb7df5a8fcdbc96694bc965eaf53fc327e5c3edbc97e317e24487543
     outputs:
       version: ${{ steps.version.outputs.value }}
       version_bare: ${{ steps.version.outputs.bare_value }}
@@ -104,10 +104,10 @@ jobs:
         run: make package-native
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
       - name: build docker image (no browser)
-        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
           push: false
@@ -118,7 +118,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: build docker image (browser)
-        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
           push: false
@@ -178,7 +178,7 @@ jobs:
 
       - name: Generate release app token
         id: sm-release-app
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        uses: actions/create-github-app-token@df432ceedc7162793a195dd1713ff69aefc7379e # v2.0.6
         with:
           app-id: ${{ env.SM_RELEASE_APP_ID }}
           private-key: ${{ env.SM_RELEASE_APP_PRIVATE_KEY }}
@@ -199,7 +199,7 @@ jobs:
           git config --global --add safe.directory '*'
 
       - name: download build artifacts
-        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           pattern: build-artifacts-*
@@ -333,14 +333,14 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: ./go.mod
 
       - name: Trigger argo workflow
         # trigger-argo-workflow hasn't been released yet, so we're using a
         # commit hash to reference it that has no associated version.
-        uses: grafana/shared-workflows/actions/trigger-argo-workflow@68b38bbdab1250d8438cfe7596028285c79ae3fe
+        uses: grafana/shared-workflows/actions/trigger-argo-workflow@00646b30431b955ec3c00982b23b1eeb7b66445b
         with:
           namespace: synthetic-monitoring-cd
           workflow_template: deploy-${{ needs.preflight.outputs.repo_name }}
